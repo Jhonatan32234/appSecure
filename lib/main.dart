@@ -42,42 +42,60 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   void initState() {
     super.initState();
-    _verificarEntornoSeguro();
+    // Forzamos a Flutter a esperar a que la pantalla esté totalmente dibujada antes de verificar
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _verificarEntornoSeguro();
+    });
   }
 
   Future<void> _verificarEntornoSeguro() async {
+    if (!mounted) return;
     setState(() {
       _isChecking = true;
     });
 
-    // 1. Solicitar permisos de ubicación en Flutter
-    var status = await Permission.location.request();
+    // 1. Verificar el estado actual del permiso antes de pedirlo
+    var status = await Permission.location.status;
+
+    if (status.isDenied || status.isPermanentlyDenied) {
+      // Solicitar el permiso si no se tiene
+      status = await Permission.location.request();
+
+      // ¡TRUCO CRÍTICO!: Si el usuario acaba de aceptar el permiso, le damos 600 milisegundos
+      // al sistema operativo para que asiente el permiso antes de despertar al chip GPS en Kotlin.
+      if (status.isGranted) {
+        await Future.delayed(const Duration(milliseconds: 600));
+      }
+    }
 
     if (status.isGranted) {
       try {
-        // 2. Invocar el canal nativo (Ahora nos devuelve un String)
+        // 2. Invocar el canal nativo
         final String resultadoAndroid = await platform.invokeMethod('checkFakeGPS');
 
+        if (!mounted) return;
         setState(() {
           if (resultadoAndroid == "CLEAN") {
             _isFakeGpsDetected = false;
           } else {
             _isFakeGpsDetected = true;
-            _culpableInfo = resultadoAndroid; // Guardamos los datos técnicos del software sospechoso
+            _culpableInfo = resultadoAndroid;
           }
           _isChecking = false;
         });
       } on PlatformException catch (e) {
+        if (!mounted) return;
         setState(() {
           _isFakeGpsDetected = true;
-          _culpableInfo = "Error en el canal nativo: ${e.message}";
+          _culpableInfo = "Error en canal nativo: ${e.message}";
           _isChecking = false;
         });
       }
     } else {
+      if (!mounted) return;
       setState(() {
         _isFakeGpsDetected = true;
-        _culpableInfo = "Permiso de ubicación denegado por el usuario.";
+        _culpableInfo = "Permiso de ubicación denegado o revocado.";
         _isChecking = false;
       });
     }

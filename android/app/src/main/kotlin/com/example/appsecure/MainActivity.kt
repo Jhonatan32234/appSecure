@@ -52,39 +52,76 @@ class MainActivity: FlutterActivity() {
                 return
             }
 
-            // Seleccionamos el mejor proveedor activo (GPS por hardware o Red)
-            val provider = if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                LocationManager.GPS_PROVIDER
-            } else {
-                providers[0]
-            }
+            val handler = android.os.Handler(android.os.Looper.getMainLooper())
+            var hasResponded = false
 
-            // Pedimos una sola actualización instantánea al chip
-            locationManager.requestSingleUpdate(provider, object : LocationListener {
+            // El Listener ahora procesará las respuestas de cualquier proveedor que despierte primero
+            val locationListener = object : LocationListener {
                 override fun onLocationChanged(location: Location) {
-                    // 1. Evaluamos si es una ubicación simulada (Mock) de forma segura y compatible
                     val isMock = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
                         location.isMock
                     } else {
-                        // Corrección: Usamos ?. para evitar el error de nulidad y "mockLocation" como String directo
                         location.extras?.getBoolean("mockLocation", false) == true
                     }
 
-                    // 2. Construimos el reporte detallado del origen de la señal
-                    val infoCulpable = "Proveedor: ${location.provider} | Precision: ${location.accuracy}m"
+                    // SI DETECTA FAKE GPS: Cortamos de inmediato y mandamos la alerta (prioridad máxima)
+                    if (isMock) {
+                        if (!hasResponded) {
+                            hasResponded = true
+                            handler.removeCallbacksAndMessages(null)
+                            locationManager.removeUpdates(this)
+                            val infoCulpable = "Proveedor: ${location.provider} (SIMULADO) | Precision: ${location.accuracy}m"
+                            callback(true, infoCulpable)
+                        }
+                        return
+                    }
 
-                    callback(isMock, infoCulpable)
+                    // SI NO ES MOCK: Esperamos un momento por si el otro proveedor (el GPS) sí trae la simulación.
+                    // Si ya es el último recurso o la precisión es alta, cerramos de forma limpia.
+                    if (!hasResponded && (location.provider == LocationManager.GPS_PROVIDER || !locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER))) {
+                        hasResponded = true
+                        handler.removeCallbacksAndMessages(null)
+                        locationManager.removeUpdates(this)
+                        callback(false, "CLEAN")
+                    }
                 }
 
                 override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
                 override fun onProviderEnabled(provider: String) {}
                 override fun onProviderDisabled(provider: String) {}
-            }, Looper.getMainLooper())
+            }
+
+            // TIMEOUT DE EMERGENCIA: Si tras 3.5 segundos nadie confirma Fake GPS, dejamos pasar al usuario
+            handler.postDelayed({
+                if (!hasResponded) {
+                    hasResponded = true
+                    locationManager.removeUpdates(locationListener)
+
+                    // Auditoría rápida de respaldo sobre el caché del GPS que es donde se oculta el Fake GPS
+                    val lastGpsLoc = locationManager.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                    if (lastGpsLoc != null) {
+                        val isMock = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) lastGpsLoc.isMock else lastGpsLoc.extras?.getBoolean("mockLocation", false) == true
+                        if (isMock) {
+                            callback(true, "Respaldo Cache GPS -> Detectado Simulador Pasivo")
+                            return@postDelayed
+                        }
+                    }
+                    callback(false, "CLEAN")
+                }
+            }, 3500)
+
+            // ESCUCHA MULTITAREA: Nos suscribimos a la Red Y al Satélite simultáneamente
+            if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                locationManager.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, locationListener, android.os.Looper.getMainLooper())
+            }
+            if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                locationManager.requestSingleUpdate(LocationManager.GPS_PROVIDER, locationListener, android.os.Looper.getMainLooper())
+            }
 
         } catch (e: SecurityException) {
             callback(true, "Error de Permisos: Falta habilitar ubicación en el dispositivo.")
         } catch (e: Exception) {
-            callback(false, "CLEAN") // Ante una falla física crítica, no bloqueamos el login
+            callback(false, "CLEAN")
         }
     }
 }
